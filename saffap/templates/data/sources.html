@@ -1,0 +1,25 @@
+{% extends '../base.html' %}
+{% block content %}
+
+<div class="container">
+  <table class="table">
+    <thead>
+      <th>Name</th>
+      <th>Country</th>
+    </thead>
+    <tbody>
+      {% for source in object_list %}
+      <tr>
+        <td>{{source.name}}</td>
+        {% if source.country == 0 %}
+        <td>Ireland</td>
+        {% else %}
+        <td>United Kingdom</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

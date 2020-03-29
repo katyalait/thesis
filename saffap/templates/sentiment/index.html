@@ -1,0 +1,12 @@
+{% extends '../base.html' %}
+{% block content %}
+
+<div class="container">
+  <h3>Analyse Data</h3>
+<a class="btn btn-primary" href="{% url 'graph_sent' %}">Graph</a>
+<a class="btn btn-primary" href="{% url 'table_sent' %}">Table</a>
+<br><br>
+{% block main %}
+{% endblock %}
+</div>
+{% endblock %}
