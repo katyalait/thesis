@@ -83,9 +83,9 @@ class ArticlePreprocessor(object):
 class FinancialDataPreprocessor(object):
     def __init__(self, filename, date="Date", open="Open",
                     adj_close="Adj Close", close="Close", high="High",
-                    low="Low", volume="Volume", adj_included=True):
-        path = os.path.join(BASE_DIR, filename)
-        self.df = pd.read_csv(path, header=0, index_col=None)
+                    low="Low", volume="Volume", adj_included=False):
+
+        self.df = pd.read_csv(filename, header=0, index_col=None)
         self.df = self.df.fillna(self.df.mean())
         self.numeric_cols = [close, open, high, low, volume]
         self.date = date
@@ -101,7 +101,7 @@ class FinancialDataPreprocessor(object):
 
     def set_asset(self, name, ticker):
         try:
-            self.asset = Asset.objects.get(name=name)
+            self.asset = Asset.objects.get(name=name, ticker=ticker)
             self.exist_stocks = pd.DataFrame(([s.asset.ticker, s.date]
                                         for s in StockPrice.objects.filter(asset=asset)),
                                         columns=['asset', 'date'])
@@ -114,11 +114,11 @@ class FinancialDataPreprocessor(object):
     def create_objects(self):
         df_len = len(self.df.index)
 
-        for col in self.numeric_cols:
-            if self.df[col].dtype == 'object':
-                self.df[col] = self.df[col].apply(lambda x: float(x.replace(",", "")))
-                if col==self.volume:
-                    self.df[col] = self.df[col].apply(self.convert_vol)
+        # for col in self.numeric_cols:
+        #     if self.df[col].dtype == 'object':
+        #         self.df[col] = self.df[col].apply(lambda x: float(x.replace(",", "")))
+        #         if col==self.volume:
+        #             self.df[col] = self.df[col].apply(self.convert_vol)
 
         for index, row in self.df.iterrows():
             stockprice = None
@@ -127,10 +127,10 @@ class FinancialDataPreprocessor(object):
             if not stockprice:
                 progress(index, df_len, "Creating stock price object ...")
                 curday = parser.parse(row[self.date]).date()
-                interday = math.log(row[self.close]/row[self.open], 10)
+                interday = math.log(row[self.close]/row[self.open], 10)*100
                 stockprice = StockPrice(asset=self.asset, open=row[self.open],
                                         close=row[self.close], high=row[self.high],
-                                        low=row[self.low], adj_close=row[self.adj_close] if self.adj_included else row[close],
+                                        low=row[self.low], adj_close=row[self.adj_close] if self.adj_included else row[self.close],
                                         volume= 0.0 if not row[self.volume] else row[self.volume],
                                         interday_volatility=interday)
                 stockprice.save()
@@ -151,6 +151,9 @@ class FinancialDataPreprocessor(object):
         if '.' in x:
             x = x.replace('.', '')
         return x
+
+
+
 
 def produce_plots(articles):
     # # TODO: change to new iterator which will call stock iterator and then

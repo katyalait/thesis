@@ -18,11 +18,32 @@
       </form>
     </div>
   </div>
-  <hr>
+  <div class="text-center">
+
+
+  <h4>Return - Nominal</h4>
   {% autoescape off %}
-  {{ plotdiv }}
+  {{ return }}
   {% endautoescape %}
-  <table class="table">
+  <hr>
+  <h4>Return - Moving Average</h4>
+  {% autoescape off %}
+  {{ retewm }}
+  {% endautoescape %}
+  <hr>
+  <h4>Price - Nominal</h4>
+  {% autoescape off %}
+  {{ price }}
+  {% endautoescape %}
+  <hr>
+  <h4>Volume - Moving Average</h4>
+  {% autoescape off %}
+  {{ volewm }}
+  {% endautoescape %}
+  <hr>
+  <hr>
+
+  <!-- <table class="table">
     <thead>
       <th>Date</th>
       <th>Asset</th>
@@ -43,7 +64,8 @@
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table> -->
+    </div>
 </div>
 
 {% endblock %}

@@ -63,7 +63,7 @@ class Asset(models.Model):
     ticker = models.CharField(max_length=10)
 
     def __str__(self):
-        return "Asset: " + self.name
+        return self.name
 
 class StockPrice(models.Model):
     asset = models.ForeignKey(Asset, on_delete=models.SET_NULL, null=True)

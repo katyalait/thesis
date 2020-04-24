@@ -1,25 +1,41 @@
 {% extends '../base.html' %}
 {% block content %}
 
-<div class="container">
-  <table class="table">
-    <thead>
-      <th>Name</th>
-      <th>Country</th>
-    </thead>
-    <tbody>
-      {% for source in object_list %}
-      <tr>
-        <td>{{source.name}}</td>
-        {% if source.country == 0 %}
-        <td>Ireland</td>
-        {% else %}
-        <td>United Kingdom</td>
-        {% endif %}
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+
+<div class="container text-center">
+
+        <h4>Paper Breakdown</h4>
+        {% autoescape off %}
+        {{ results }}
+        {% endautoescape %}
+    <hr>
+      <h4>Country Breakdown</h4>
+      {% autoescape off %}
+      {{ results_1 }}
+      {% endautoescape %}
+    <hr>
+
+      <h4>Daily Output - Nominal</h4>
+      {% autoescape off %}
+      {{ count }}
+      {% endautoescape %}
+
+    <hr>
+
+      <h4>Daily Output - Moving Average</h4>
+
+      {% autoescape off %}
+      {{ ewm }}
+      {% endautoescape %}
+
+
+      <h4>Cumulative Sum</h4>
+      {% autoescape off %}
+      {{ cumsum }}
+      {% endautoescape %}
+
+    <hr>
+    <hr>
 </div>
 
 {% endblock %}

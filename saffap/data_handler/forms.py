@@ -15,7 +15,7 @@ class FilterForm(forms.Form):
 class StockFilterForm(forms.Form):
     year_range = tuple([i for i in range(2016, 2021)])
     assets = Asset.objects.all()
-    # # TODO: Insert validator to ensure that start < end 
+    # # TODO: Insert validator to ensure that start < end
     date_start = forms.DateField(widget=forms.SelectDateWidget(years=year_range))
     date_end = forms.DateField(widget=forms.SelectDateWidget(years=year_range))
     # # TODO: Change this ModelMultipleChoiceField
@@ -23,3 +23,13 @@ class StockFilterForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
         super(StockFilterForm, self).__init__(*args, **kwargs)
+
+class FinancialDataForm(forms.Form):
+    asset_name = forms.CharField(max_length=100)
+    ticker = forms.CharField(max_length=10)
+    title = forms.CharField(max_length=100)
+    file = forms.FileField()
+
+class ArticleDataForm(forms.Form):
+    title = forms.CharField(max_length=100)
+    file = forms.FileField()

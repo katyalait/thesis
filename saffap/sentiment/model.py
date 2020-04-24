@@ -1,3 +1,6 @@
+from statsmodels.tsa.vector_ar.vecm import coint_johansen
+from statsmodels.stats.stattools import durbin_watson
+
 import gensim
 import re
 import pandas as pd
@@ -21,11 +24,14 @@ from plotly.offline import plot
 import plotly.graph_objects as go
 from statsmodels.tsa.api import VAR
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-from data_handler.iterators import SentimentIterator, SentimentExtractor
+from data_handler.iterators import SentimentIterator, SentimentExtractor, SentiWordNetExtractor
 from statsmodels.tsa.stattools import adfuller
 import hurst as hrst
 from scipy import stats
+import numpy as np
 from django.db.models import Avg, Count, Min, Sum, Max
+from scipy.stats import t
+from scipy.stats import pearsonr
 
 
 
@@ -71,9 +77,9 @@ class DocModelGenerator(object):
             self.similar = similar
 
         def __iter__(self):
-            for headline, rating in similar:
+            for headline, rating in self.similar:
                 article = Article.objects.get(headline=headline)
-                yield Rating(article, rating)
+                yield (article, rating)
 
 
 
@@ -82,7 +88,7 @@ class DocModelGenerator(object):
 
     def load_model(self, path):
         full_path  = os.path.join(BASE_DIR, path)
-        self.model = Doc2Vec.laod(full_path)
+        self.model = Doc2Vec.load(full_path)
 
 
     def load_csv(self, file_path, headline='headline',
@@ -130,19 +136,19 @@ class DocModelGenerator(object):
 
     def get_related_articles(self, article, topn=20, ratings=True):
         similar = self.model.docvecs.most_similar(article.headline, topn=topn)
-        return self._article_iter(similar)
-
-
+        return [a for a in self._article_iter(similar)]
 
 
 
 
 class SentimentPriceModel(object):
     sentiments = Category.objects.all().values_list('name', flat=True)
-
+    weights_c = {'Financial Times (London, England)': 385833/1503479, 'The Irish Times': 171288/383244, 'Irish Independent': 211956/383244,'The Times (London)': 799655/1503479,  'The Guardian(London)': 317991/1503479 }
+    weights_t = {'Financial Times (London, England)': 385833/1886723, 'The Irish Times': 171288/1886723, 'Irish Independent': 211956/1886723,'The Times (London)': 799655/1886723,  'The Guardian(London)': 317991/1886723 }
     class StationaryResults():
         def __init__(self, df, column, adf, hurst):
             self.df = df[column].dropna()
+            self.column = column
             if adf:
                 self.adf = True
                 self.result = adfuller(self.df)
@@ -156,7 +162,7 @@ class SentimentPriceModel(object):
                 self.c = c
                 self.data = data
         def __repr__(self):
-            result = ""
+            result = "Testing {} for stationary".format(self.column)
             if self.adf:
                 result += 'Low ADF statistic tells us that the series is non-stationary.\n'
                 result += 'P-values higher than 0.05 also indicate non-stationarity.\n'
@@ -168,7 +174,8 @@ class SentimentPriceModel(object):
             if self.hurst:
                     result += 'H < 0.5 is stationary\nH > 0.05 is non-stationary\n'
                     result += 'H = 0.5 is random walk/Brownian motion.\n'
-                    result += 'H = {:.4f}, c = {:.4f}'.format(self.H, self.c)
+                    result += 'H = {:.4f}, c = {:.4f}\n\n'.format(self.H, self.c)
+            print(result)
             return result
 
     class ModelPlotter:
@@ -176,7 +183,8 @@ class SentimentPriceModel(object):
             self.fig = go.Figure()
             self.df = df
             for column in self.df.columns:
-                self.fig.add_trace(go.Scatter(x=self.df.index, y=self.df[column], mode='lines', name=column))
+                ewm = self.df.loc[:,column].ewm(span=30,adjust=False).mean()
+                self.fig.add_trace(go.Scatter(x=self.df.index, y=ewm, mode='lines', name=column))
 
         def add_line(self, df, column):
             self.fig.add_trace(go.Scatter(x=self.df.index, y=df[column], mode='lines', name=column))
@@ -188,12 +196,185 @@ class SentimentPriceModel(object):
         def plot(self):
             self.fig.show()
 
+
+    class VAR:
+        def __init__(self, df):
+            self.df = df
+            self.model = VAR(df)
+
+
+        def get_order_table(self, order, bootstrap=True):
+            result = self.model.select_order(order)
+            result = result.summary()
+            html = result.as_html()
+            if bootstrap:
+                html = html.replace('simpletable', 'table')
+            return html
+        def adjust(self, val, length= 6):
+            return str(val).ljust(length)
+
+        def cointegration_test(self, df, key_col, alpha=0.05):
+            """Perform Johanson's Cointegration Test and Report Summary"""
+            out = coint_johansen(df,-1,5)
+            d = {'0.90':0, '0.95':1, '0.99':2}
+            traces = out.lr1
+            cvts = out.cvt[:, d[str(1-alpha)]]
+            print('\nName   ::  Test Stat > C(95%)    =>   Signif  \n', '--'*20)
+            for col, trace, cvt in zip(df.columns, traces, cvts):
+                if col == key_col:
+                    return self.adjust(round(trace,2), 9), self.adjust(cvt, 8)
+
+        def fit_model(self, lag=1, freq=None):
+            if not freq==None:
+                try:
+                    self.df.index = pd.DatetimeIndex(pd.to_datetime(self.df.index)).to_period(freq)
+                except:
+                    logging.info('Period type already set to {}'.format(self.df.index.freq))
+            self.fit = self.model.fit(lag, trend='nc', verbose=True)
+            return self.fit
+
+        def coefficient_df(self, lag, key_col):
+            try:
+                fit = self.fit
+            except:
+                fit = self.fit_model(lag=lag, freq="B")
+            df = pd.DataFrame()
+            spm2 = SentimentPriceModel()
+            mv = self.df
+            cols = mv.columns
+            acc_df = pd.DataFrame()
+            acc_df[key_col] = mv[key_col]
+            acc_df.set_index(mv.index)
+            counter = 1
+            stop = 100
+            test_stats = pd.DataFrame(index=["Test-Stat"])
+            critical = pd.DataFrame(index=["Critical"])
+            durbin = pd.DataFrame(index=["Durbin-Watson"])
+            for col in cols:
+                if col == key_col:
+                    continue
+                model = "Model {}".format(counter)
+                acc_df[col] = mv[col]
+                acc_df = acc_df.dropna()
+                spm2.set_df(acc_df)
+                var = spm2.var()
+                fit = var.model.fit(lag)
+                index = fit.get_eq_index(key_col)
+                df_out = pd.DataFrame(columns = [model])
+                lookup = {}
+                out = durbin_watson(fit.resid)
+                dw = 0
+                for col1, val in zip(acc_df.columns, out):
+                    if col1 == col:
+                        dw = round(val, 2)
+                durbin[model] = pd.DataFrame({dw}, index=["Durbin-Watson"], columns=[model])[model]
+                print(durbin)
+                print(dw)
+                teststat, crit = self.cointegration_test(acc_df, key_col)
+                test_stats[model] = pd.DataFrame({teststat}, index=["Test-Stat"], columns=[model])[model]
+                critical[model] = pd.DataFrame({crit}, index=["Critical"], columns=[model])[model]
+                for name in fit.names:
+                    j = fit.get_eq_index(name)
+                    lookup[j] = name
+
+                for i in range(len(fit.coefs[0])):
+                    row = lookup[i]
+                    for j in range(len(fit.coefs)):
+                        t = j+1
+                        row_name = "{} t-{}".format(row, t)
+                        pval = fit.pvalues[key_col]["L{}.{}".format(t, row)]
+                        res = ""
+                        if pval <= 0.10 and pval > 0.05:
+                            res = "{:.3f}*".format(fit.coefs[j][index][i])
+                        elif pval <= 0.05 and pval > 0.01:
+                            res = "{:.3f}**".format(fit.coefs[j][index][i])
+                        elif pval <= 0.01:
+                            res = "{:.3f}***".format(fit.coefs[j][index][i])
+                        else:
+                            res = "{:.3f}".format(fit.coefs[j][index][i])
+                        df_out.loc[row_name] = res
+
+                df = pd.concat([df, df_out], axis=1, sort=False)
+                counter += 1
+                if counter == stop:
+                    print(fit.summary())
+                    break
+            df = pd.concat([df, durbin], sort=False)
+            df = pd.concat([df, test_stats], sort=False)
+            df = pd.concat([df, critical], sort=False)
+            df = df.fillna("-")
+            return df
+
+        def pvalues(self, bootstrap=True, lag=1, freq=None):
+            tvals = ""
+            try:
+                tvals = self.fit.tvalues
+            except:
+                self.fit_model(lag=lag, freq=freq)
+                tvals = self.fit.tvalues
+            df = tvals.copy()
+            for index, row in tvals.iterrows():
+                for col in tvals.columns:
+                    val = row[col]
+                    pval = t.sf(abs(val), len(self.df)-1)*2
+                    if pval < 0.05:
+                        pval = "*{:.3f}$".format(pval)
+                    else:
+                        pval = "{:.3f}".format(pval)
+                    df.loc[index,col] = pval
+            html = df.to_html()
+            if bootstrap:
+                html = html.replace('dataframe','table table-bordered table-striped table-hover').replace('border=\"1\"', "")
+            html = html.replace("*", "<b>").replace("$","</b>")
+            return html
+
+        def correlation(self, freq=None):
+            corr = ""
+            df = self.df
+            pvals = pd.DataFrame(columns=df.columns, index=df.columns)
+            for i in df.columns:
+                for j in df.columns:
+                    correl, pval = pearsonr(df[i], df[j])
+                    correl = "{:.2f}%".format(correl*100)
+                    if pval <= 0.10 and pval > 0.05:
+                        pvals.loc[i][j] = "£{}$".format(correl)
+                    elif pval <= 0.05 and pval > 0.01:
+                        pvals.loc[i][j] = "£{}$*".format(correl)
+                    elif pval <= 0.01:
+                        pvals.loc[i][j] = "£{}$**".format(correl)
+                    else:
+                        pvals.loc[i][j] = correl
+
+            return pvals
+
+        def is_significant(self, col, row, lag, sig):
+            tvals = self.fit.tvalues
+            rows = ["L{}.{}".format(i+1, row) for i in range(lag)]
+            for r in rows:
+                val = tvals.loc[r,col]
+                pval = t.sf(abs(val), len(self.df)-1)*2
+                if pval <= sig:
+                    return True
+            return False
+
+        def signif_correlation(self, freq=None, bootstrap=True):
+            corr = self.correlation(freq=freq)
+            for i in range(len(corr)):
+                for j in range(0, i):
+                    corr.iloc[i,j] = ""
+            html = corr.to_html(classes="table table-bordered table-striped table-hover")
+            html = html.replace('simpletable', '')
+            html = html.replace('border=\"1\"', "")
+            html = html.replace("£", "<b>").replace("$","</b>")
+            return html
+
+
     def __init__(self):
         self.assets = Asset.objects.all()
 
     def load_csv(self, path):
-        df = pd.load_csv(os.path.join(BASE_DIR, path))
-        df.index = df['date']
+        df = pd.read_csv(os.path.join(BASE_DIR, path), index_col='date')
+        #df.index = df['date']
         self.multivariate_df = df
         return df
 
@@ -215,11 +396,32 @@ class SentimentPriceModel(object):
             cur_col = cur_col.set_index('date')
             df[column] = cur_col['value']
         if set:
-            self.multivariate_df = df
+            print("Is na: {}".format(df.isna().sum()))
+            self.multivariate_df = df.fillna(0.001)
+
         return df
 
+    def slice_year(self, year):
+        try:
+            df = self.multivariate_df.copy()
+        except:
+            raise Exception("Plese set a dataframe")
+        if not year == 0:
+            start = "{}-01-01".format(year)
+            end = "{}-01-01".format(year+1)
+            startdate = pd.to_datetime(start).date()
+            enddate = pd.to_datetime(end).date()
+            df = df.loc[startdate:enddate].dropna()
+        return df
 
-    def get_asset(self, asset=None, reset_df=True, start=None, end=None, column_name='return', zscore=True):
+    def get_df(self):
+        return self.multivariate_df.copy()
+
+    def set_df(self, df):
+        self.multivariate_df = df
+
+
+    def get_asset(self, asset=None, reset_df=True, start=None, end=None, column_name='return', zscore=True, volume=False, get_asset=True):
         unique = self.assets.values_list('ticker', flat=True)
         if asset==None:
             raise Exception('Not enough arguments provided, please pass a value for asset. The following are options for your model: \n{}'.format(unique))
@@ -231,42 +433,62 @@ class SentimentPriceModel(object):
             end = StockPrice.objects.filter(asset__ticker=asset).values_list('date').annotate(Max('date')).order_by('-date')[0][1]
 
         stocks = StockPrice.objects.filter(asset__ticker=asset).filter(date__range=[start, end])
-        asset_df = pd.DataFrame(([s.date, s.interday_volatility] for s in stocks), columns=['date', column_name]).set_index('date')
+        if volume and get_asset:
+            asset_df = pd.DataFrame(([s.date, s.interday_volatility, s.volume] for s in stocks), columns=['date', column_name + " Return", column_name + " Volume"]).set_index('date')
+        elif not volume and get_asset:
+            asset_df = pd.DataFrame(([s.date, s.interday_volatility] for s in stocks), columns=['date', column_name + " Return"]).set_index('date')
+        elif volume and not get_asset:
+            asset_df = pd.DataFrame(([s.date, s.volume] for s in stocks), columns=['date', column_name + " Volume"]).set_index('date')
         if zscore:
-            asset_df[column_name] = stats.zscore(asset_df[column_name])
+            for col in asset_df.columns:
+                asset_df[col] = stats.zscore(asset_df[col])
+
         if reset_df:
             self.asset_name = asset
             self.dates = asset_df.index
             self.asset_df = asset_df
         return asset_df
 
-    def get_sentiment(self, category='Negativ', set=False, zscore=True, column_name=None, source_filter=[], sentiment_words=[]):
-        if category in SentimentPriceModel.sentiments:
-            logging.info("Extracting {} sentiment from articles".format(category))
-            sentiment_words = list(Category.objects.get(name=category).words.all().values_list('word', flat=True))
-
-        elif len(sentiment_words) > 0:
-            if category=='Negativ':
-                raise Exception('Please specify a category name')
-        else:
-            raise Exception('Sentiment not specified. Please enter one of the options available by callings <SentimentPriceModelInstance>.sentiments or pass a list of sentiment words.')
-
+    def get_sentiment(self, category=None, set=False, zscore=True, column_name=None, source_filter=[], sentiment_words=[], sentiwordnet=False, include_pos=False, h_contents = []):
+        sentiment_df = pd.DataFrame()
+        # check if they specified sentiment words
+        if len(sentiment_words)==0:
+            # check if they specified sentiwordnet
+            if not sentiwordnet:
+                # check if they set a category
+                if not category:
+                    raise Exception('Please specify a category name')
+                else:
+                    logging.info("Extracting {} sentiment from articles".format(category))
+                    sentiment_words = [w.lower() for w in list(Category.objects.get(name=category).words.all().values_list('word', flat=True))]
+                    if not column_name:
+                        column_name = category
         if not column_name:
-            column_name = category
+            raise Exception('Please set category name')
 
         if len(source_filter) > 0:
             sources = Source.objects.filter(id__in=source_filter).values_list('id', flat=True)
         else:
             sources = Source.objects.all().values_list('id', flat=True)
+        if not sentiwordnet:
+            sentiment_df = pd.DataFrame(([s['date'], s['sentiment']]
+                                        for s in SentimentExtractor(self.dates,
+                                                                sentiment_words,
+                                                                sources,
+                                                                h_contents)),
+                                        columns=['date', column_name]).set_index('date')
+        else:
+            sentiment_df = pd.DataFrame(([s['date'], s['n_sentiment'], s['p_sentiment']]
+                                        for s in SentiWordNetExtractor(self.dates,
+                                                                sources,
+                                                                h_contents)),
+                                        columns=['date', "{} Negative".format(column_name),
+                                                "{} Positive".format(column_name)]).set_index('date')
 
-        sentiment_df = pd.DataFrame(([s['date'], s['sentiment']]
-                                    for s in SentimentExtractor(self.dates,
-                                                            sentiment_words,
-                                                            sources)),
-                                    columns=['date', column_name]).set_index('date')
-            # get the z-score
-        if zscore:
-            sentiment_df[column_name] = stats.zscore(sentiment_df[column_name])
+                # get the z-score
+            if not include_pos:
+                sentiment_df = sentiment_df.drop(["{} Positive".format(column_name)], axis=1)
+
         if set:
             self.sentiment_df = sentiment_df
         return sentiment_df
@@ -274,26 +496,43 @@ class SentimentPriceModel(object):
     def test_stationary(self, column='return', adf=True, hurst=True, df=None):
         if not df:
             try:
-                df = self.asset_df
+                df = self.multivariate_df
             except:
                 raise AttributeError('Please set the asset to test by calling get_asset()')
-        stationary_results = self.StationaryResults(df, column, adf, hurst)
-        print(stationary_results)
+        stationary_results = [self.StationaryResults(df, column, adf, hurst) for column in df.columns]
         return stationary_results
 
-    def var_model(self, df=None, lag=1, freq=None):
-        if df==None:
+    def var(self, df=pd.DataFrame()):
+        if df.empty:
             df = self.multivariate_df
-        if not freq==None:
-            try:
-                df.index = pd.DatetimeIndex(pd.to_datetime(df.index)).to_period(freq)
-            except:
-                logging.info('Period type already set to {}'.format(df.index.freq))
-        model = VAR(df)
-        results = model.fit(lag)
-        return results
+        model = self.VAR(df)
+        return model
 
-    def add_asset_variable(self, left=None, asset=None, reset_df=False, set_multi=True, column_name='return', zscore=True):
+    def stats(self, df=pd.DataFrame(), bootstrap=True):
+        if df.empty:
+            df = self.multivariate_df
+        df2 = pd.DataFrame()
+        for col in df.columns:
+            df_temp = pd.DataFrame(
+                                [df[col].mean(),
+                                df[col].std(),
+                                df[col].var(),
+                                (df[col].skew()),
+                                (df[col].kurtosis()),
+                                (np.amax(df[col])),
+                                (np.amin(df[col]))],
+                                columns=[col]
+                        )
+            df2[col] = df_temp[col]
+        df2.index = ["Mean", "S.D", "Variance", "Skew", "Kurtosis", "Max", "Min"]
+        html = df2.to_html()
+        if bootstrap:
+            html = html.replace('border=\"1\"', "")
+            html = html.replace('dataframe','table table-bordered table-striped table-hover')
+        return html
+
+
+    def add_asset_variable(self, left=None, asset=None, reset_df=False, set_multi=True, column_name='return', zscore=True, volume=False, get_asset=True):
         if not left:
             try:
                 left = self.multivariate_df
@@ -301,16 +540,21 @@ class SentimentPriceModel(object):
                 try:
                     left = self.asset_df
                 except:
-                    raise Exception('Please set the asset_df variable by calling get_asset().')
+                    left = pd.DataFrame()
         if not asset:
             raise Exception('Not enough arguments provided, please pass a value for asset. The following are options for your model: \n{}'.format(self.asset_df['asset'].unique()))
-        right = self.get_asset(asset=asset, reset_df=reset_df, column_name=column_name, zscore=zscore)
-        merged = left.merge(right=right, on='date')
+        if left.empty:
+            reset_df=True
+        right = self.get_asset(asset=asset, reset_df=reset_df, column_name=column_name, zscore=zscore, volume=volume, get_asset=get_asset)
+        if not left.empty:
+            merged = left.merge(right=right, on='date')
+        else:
+            merged = right
         if set_multi:
             self.multivariate_df = merged
         return merged
 
-    def add_sentiment_variable(self, left=None, category=None, set=False, zscore=True, column_name=None, source_filter=[], reset_df=False, sentiment_words = []):
+    def add_sentiment_variable(self, left=None, category="", set=True, zscore=True, column_name=None, source_filter=[], reset_df=False, sentiment_words = [], include_pos=False,  sentiwordnet=False, h_contents=[], weighted=False, countries=False):
         if not left:
             try:
                 left = self.multivariate_df
@@ -319,19 +563,41 @@ class SentimentPriceModel(object):
                     left = self.asset_df
                 except:
                     raise Exception('Please set the asset_df variable by calling get_asset().')
-        if not category:
-            raise Exception('Please provide a sentiment category. Options can be found by calling <SentimentPriceModelInstance>.sentiments')
         if not column_name:
-            column_name = right
+            column_name = category
+        sentiment_df = self.get_sentiment(category=category, zscore=zscore,
+                                                column_name=column_name,
+                                                source_filter=source_filter,
+                                                set=reset_df,
+                                                include_pos=include_pos,
+                                                sentiment_words=sentiment_words,
+                                                sentiwordnet=sentiwordnet,
+                                                h_contents = h_contents)
 
-        sentiment_df = self.get_sentiment(category=category, zscore=zscore, column_name=column_name, source_filter=source_filter, set=reset_df, sentiment_words=sentiment_words)
-        new_df = left.merge(right=sentiment_df, on='date')
+        if weighted and len(source_filter) == 1:
+            sourcename = Source.objects.get(id=source_filter[0]).name
+            for col in sentiment_df.columns:
+                print("Multiplying by weights: {}".format(col))
+                if countries:
+                    sentiment_df[col] *= self.weights_c[sourcename]
+                else:
+                    sentiment_df[col] *= self.weights_t[sourcename]
+        sentiment_df = sentiment_df.fillna(0)
+        if zscore:
+            print("Getting zscore")
+
+            for col in sentiment_df.columns:
+                print("Zscore of {}".format(col))
+                sentiment_df[col] = stats.zscore(sentiment_df[col])
+
+        new_df = pd.concat([left, sentiment_df], axis=1, sort=False)
+        # new_df = left.merge(right=sentiment_df, on='date')
         if set:
             self.multivariate_df = new_df
         return sentiment_df
 
-    def produce_plot_model(self, df=None):
-        if df == None:
+    def produce_plot_model(self, df=pd.DataFrame()):
+        if df.empty:
             try:
                 df = self.multivariate_df
             except:
@@ -343,6 +609,7 @@ class SentimentPriceModel(object):
                     except:
                         raise Exception("No dataframes set in the model.")
         self.mp = SentimentPriceModel.ModelPlotter(df=df)
+        self.save('aggregate2.csv')
         return self.mp
 
 
@@ -368,6 +635,12 @@ class SentimentPriceModel(object):
                     df = self.asset_df
                 except:
                     raise Exception("Asset DF not set. Set this before attempting to save it to database.")
+        try:
+            df.index = pd.DatetimeIndex(df.index.to_timestamp())
+        except:
+            pass
+        print(df.head())
+        print("Length: {},{}".format(df.shape[0], df.shape[1]))
         object_creation_count = 0
         cols, rows = df.shape
         desired_count = cols*rows + len(df.columns) + 1
@@ -393,18 +666,72 @@ class ArticleSentimentPriceModel(object):
     associated returns of markets on a given day.
     """
     class _SentiRet:
-        def __init__(self, return, sentiment):
+        def __init__(self, returns, sentiment):
             self.returns = returns
             self.sentiment = sentiment
 
     def __init__(self, articles, asset, category):
         self.articles = articles
-        words = 
 
         self.dates = list(set(articles.values_list('date_written', flat=True)))
         self.returns = StockPrice.objects.filter.filter(asset=asset).filter(date__in=self.dates).values_list('interday_volatility', flat=True)
+        # get sentiement of articles
 
-    def __iter__(self):
+class CorrelationModel(object):
+    """
+    Extracts the correlation of data streams from a correlation table and plots it.
+    """
+    def __init__(self, model_name):
+        self.spm = SentimentPriceModel()
+        self.spm.load_db(model_name, set=True)
+        self.df = self.spm.get_df()
+        self.columns = self.df.columns
+
+    def produce_plots(self, indicator):
+        self.fig = go.Figure()
+        total_df = pd.DataFrame()
+        year = 2016
+        for i in range(4):
+            df = self.spm.slice_year(year+i)
+            corr = self.correlation_df(df)
+            total_df[year+i] = corr[indicator]
+        total_df = total_df.T
+        for col in total_df.columns:
+            if col == indicator:
+                continue
+            if indicator == "UK Negative" and col=="UK Positive":
+                continue
+            if indicator == "UK Positive" and col=="UK Negative":
+                continue
+            arr = np.array(total_df[col])*100
+            self.fig.add_trace(go.Scatter(x=total_df.index, y=arr, mode='lines', name=col))
+        plt_div = plot(self.fig, output_type='div')
+        return plt_div
+
+    def produce_table(self, year):
+        df = self.spm.slice_year(year)
+        var = self.spm.var(df)
+        html = var.signif_correlation(freq="B")
+        return html
+
+    def correlation_df(self, df):
+        pvals = pd.DataFrame(columns=df.columns, index=df.columns)
+        for i in df.columns:
+            for j in df.columns:
+                correl, pval = pearsonr(df[i], df[j])
+                pvals.loc[i][j] = correl
+        return pvals
+
+class Word2VecModel(object):
+    def __init__(self):
+        # convert to lines
+        # clean lines
+        # phrase detector
+        # feed to model
+        # build model
+        # save and store in database
+        pass
+
 
 
 
@@ -449,9 +776,9 @@ def clean_articles_for_doc(row):
     total = row['headline'] + ". " + row["content"]
     return row
 
-def convert_to_lines_df(input_file):
+def convert_to_lines_df(input_file, headline, content):
     df = pd.read_csv(input_file)
-    df = df.loc[:, ['headline', 'content']]
+    df = df.loc[:, [headline, content]]
     logging.info("Cleaning null values.")
     #
     logging.info(df.isnull().sum())
@@ -487,22 +814,21 @@ def preprocess(lines):
     print("Time to clean up everything: {}".format((time() - t)/ 60))
     return clean_lines
 
-def phrase_detector(df):
+def phrase_detector(df, min_count):
     # create sentences
     sents = [line.split() for line in df['clean_docs']]
-    phrases = Phrases(sents, min_count=80, progress_per=1000)
+    phrases = Phrases(sents, min_count=min_count, progress_per=1000)
     bigram = Phraser(phrases)
     sentences = bigram[sents]
     logging.info("Finished replacing bigrams")
     logging.info(type(sentences))
-    sentences.save("corpus.mm")
     return sentences
 
 
-def create_model(sentences):
+def create_model(sentences, epochs, min_count, window, name="word2vec.model"):
     w2v_model = gensim.models.Word2Vec(
-                        min_count=20,
-                        window=2,
+                        min_count=min_count,
+                        window=window,
                         size=120,
                         sample=2e-5,
                         alpha=0.03,
@@ -519,9 +845,9 @@ def create_model(sentences):
 
     t = time()
 
-    w2v_model.train(sentences, total_examples=w2v_model.corpus_count, epochs=20, report_delay=1)
+    w2v_model.train(sentences, total_examples=w2v_model.corpus_count, epochs=epochs, report_delay=1)
 
     print('Time to train the model: {} mins'.format(round((time() - t) / 60, 2)))
 
     w2v_model.init_sims(replace=True)
-    w2v_model.save("word2vec.model")
+    w2v_model.save(name)

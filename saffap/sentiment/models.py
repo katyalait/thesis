@@ -9,16 +9,20 @@ class Category(models.Model):
         ordering = ['name']
 
 class Label(models.Model):
-    model_name = models.CharField(max_length=40, unique=True)
+    model_name = models.CharField(max_length=100, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
     description = models.TextField()
+
+    def __str__(self):
+        return self.model_name
 
     class Meta:
         ordering = ['-created_at']
 
+
 class Column(models.Model):
     label = models.ForeignKey(Label, on_delete=models.CASCADE)
-    name = models.CharField(max_length=40)
+    name = models.CharField(max_length=100)
 
     class Meta:
         ordering = ['label']
@@ -31,6 +35,12 @@ class Value(models.Model):
     class Meta:
         ordering = ['column', 'date']
 
+class Word2VecModel(models.Model):
+    name = models.CharField(max_length=40)
+    pathname = models.CharField(max_length=250)
+
+    def __str__(self):
+        return self.name
 
 
 class DaySentiment(models.Model):

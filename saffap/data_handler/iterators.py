@@ -5,6 +5,7 @@ from django.db.models import Avg, Count, Min, Sum, Max
 from nltk.tokenize import word_tokenize
 from data_handler.helpers import progress
 import pandas as pd
+from nltk.corpus import sentiwordnet as swn
 
 class StockRow(object):
     def __init__(self, stock):
@@ -110,8 +111,17 @@ class StockRowIterator(object):
             yield row
 
 class SentimentExtractor(object):
-    def __init__(self, dates, category_words, filter):
-        articles = list(Article.objects.filter(date_written__range = [dates[0], dates[-1]]).filter(source__id__in=[filter]).values_list('date_written', 'tokens'))
+    def __init__(self, dates, category_words, filter, h_contents):
+        print(h_contents)
+        if len(h_contents) > 1:
+            articles = []
+            for h in h_contents:
+                if h == "":
+                    continue
+                articles.extend(list(Article.objects.filter(date_written__range = [dates[0], dates[-1]]).filter(source__id__in=[filter]).filter(headline__icontains=h).values_list('date_written', 'tokens')))
+        else:
+            articles = list(Article.objects.filter(date_written__range = [dates[0], dates[-1]]).filter(source__id__in=[filter]).values_list('date_written', 'tokens'))
+        print(len(articles))
 
         self.df = pd.DataFrame(articles, columns=['date_written', 'tokens'])
         self.dates = dates
@@ -122,7 +132,6 @@ class SentimentExtractor(object):
         length = len(self.dates)
         for date in self.dates:
             index +=1
-            progress(index, length, status="{}".format(date))
             day_count = 0
             day_articles = self.df.loc[self.df['date_written']==date]['tokens']
             if day_articles.empty:
@@ -130,11 +139,71 @@ class SentimentExtractor(object):
             day_articles = " ".join(day_articles)
             tokens = word_tokenize(day_articles)
             tokens.sort()
-            for word in tokens:
-                if word.upper() in self.words:
-                    day_count += 1
+            token_dict = {}
+            for token in tokens:
+                if token in token_dict:
+                    token_dict[token] += 1
+                else:
+                    token_dict[token] = 1
+            for word in token_dict:
+                if word in self.words:
+                    day_count += token_dict[word]
+            progress(index, length, status="{}: {}".format(date, day_count/len(tokens)))
+
             yield {'date': date, 'count': day_count, 'length': len(tokens), 'sentiment': day_count/length}
 
+class SentiWordNetExtractor(object):
+    def __init__(self, dates, filter, h_contents):
+        print(h_contents)
+        if len(h_contents) > 1:
+
+            articles = []
+            for h in h_contents:
+                if h == "":
+                    continue
+                print("Getting articles with {} in their headline".format(h))
+                new_arts  = list(Article.objects.filter(date_written__range = [dates[0], dates[-1]]).filter(source__id__in=[filter]).filter(headline__icontains=h).values_list('date_written', 'tokens'))
+                articles = list(set(articles) | set(new_arts))
+        else:
+            print("Getting articles without headline")
+            articles = list(Article.objects.filter(date_written__range = [dates[0], dates[-1]]).filter(source__id__in=[filter]).values_list('date_written', 'tokens'))
+        print(len(articles))
+        print(filter)
+        self.df = pd.DataFrame(articles, columns=['date_written', 'tokens']).sort_values('date_written')
+        self.dates = dates
+    def __iter__(self):
+        index = 0
+        length = len(self.dates)
+        for date in self.dates:
+            index +=1
+            progress(index, length, status="{}".format(date))
+            neg_day_count = 0
+            pos_day_count = 0
+            day_articles = self.df.loc[self.df['date_written']==date]['tokens']
+            if day_articles.empty:
+                continue
+            day_articles = " ".join(day_articles)
+            tokens = word_tokenize(day_articles)
+            tokens.sort()
+            token_dict = {}
+            for word in tokens:
+                if word in token_dict:
+                    token_dict[word] += 1
+                else:
+                    token_dict[word] = 1
+            for word in token_dict:
+                try:
+                    count = token_dict[word]
+                    synset = list(swn.senti_synsets(word))[0]
+                    n_score = synset.neg_score()
+                    p_score = synset.pos_score()
+                    neg_day_count += n_score*count
+                    pos_day_count += p_score*count
+
+                except:
+                    continue
+
+            yield {'date': date, 'length': len(tokens), 'n_sentiment': neg_day_count/length, 'p_sentiment': pos_day_count/length}
 
 
 
